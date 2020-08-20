@@ -66,7 +66,6 @@ import org.apache.activemq.artemis.core.remoting.CertificateUtil;
 import org.apache.activemq.artemis.core.remoting.CloseListener;
 import org.apache.activemq.artemis.core.remoting.FailureListener;
 import org.apache.activemq.artemis.core.security.CheckType;
-import org.apache.activemq.artemis.core.security.SecurityAuth;
 import org.apache.activemq.artemis.core.security.SecurityStore;
 import org.apache.activemq.artemis.core.server.ActiveMQMessageBundle;
 import org.apache.activemq.artemis.core.server.ActiveMQServer;
@@ -488,18 +487,6 @@ public class ServerSessionImpl implements ServerSession, FailureListener {
       managementService.sendNotification(new Notification(null, type, props));
    }
 
-   private void securityCheck(SimpleString address, CheckType checkType, SecurityAuth auth) throws Exception {
-      if (securityEnabled) {
-         securityStore.check(address, checkType, auth);
-      }
-   }
-
-   private void securityCheck(SimpleString address, SimpleString queue, CheckType checkType, SecurityAuth auth) throws Exception {
-      if (securityEnabled) {
-         securityStore.check(address, queue, checkType, auth);
-      }
-   }
-
    @Override
    public ServerConsumer createConsumer(final long consumerID,
                                         final SimpleString queueName,
@@ -538,18 +525,11 @@ public class ServerSessionImpl implements ServerSession, FailureListener {
       }
 
       SimpleString address = removePrefix(binding.getAddress());
-      if (browseOnly) {
-         try {
-            securityCheck(address, queueName, CheckType.BROWSE, this);
-         } catch (Exception e) {
-            securityCheck(address.concat(".").concat(unPrefixedQueueName), queueName, CheckType.BROWSE, this);
-         }
-      } else {
-         try {
-            securityCheck(address, queueName, CheckType.CONSUME, this);
-         } catch (Exception e) {
-            securityCheck(address.concat(".").concat(unPrefixedQueueName), queueName, CheckType.CONSUME, this);
-         }
+      try {
+         securityStore.check(address, unPrefixedQueueName, browseOnly ? CheckType.BROWSE : CheckType.CONSUME, this);
+      } catch (Exception e) {
+         // this is here for backwards compatibility with the pre-FQQN syntax from ARTEMIS-592
+         securityStore.check(address.concat(".").concat(unPrefixedQueueName), queueName, browseOnly ? CheckType.BROWSE : CheckType.CONSUME, this);
       }
 
       Filter filter = FilterImpl.createFilter(filterString);
@@ -723,17 +703,13 @@ public class ServerSessionImpl implements ServerSession, FailureListener {
          .setAddress(removePrefix(queueConfiguration.getAddress()))
          .setName(removePrefix(queueConfiguration.getName()));
 
-      if (queueConfiguration.isDurable()) {
-         // make sure the user has privileges to create this queue
-         securityCheck(queueConfiguration.getAddress(), queueConfiguration.getName(), CheckType.CREATE_DURABLE_QUEUE, this);
-      } else {
-         securityCheck(queueConfiguration.getAddress(), queueConfiguration.getName(), CheckType.CREATE_NON_DURABLE_QUEUE, this);
-      }
+      // make sure the user has privileges to create this queue
+      securityStore.check(queueConfiguration.getAddress(), queueConfiguration.getName(), queueConfiguration.isDurable() ? CheckType.CREATE_DURABLE_QUEUE : CheckType.CREATE_NON_DURABLE_QUEUE, this);
 
       AddressSettings as = server.getAddressSettingsRepository().getMatch(queueConfiguration.getAddress().toString());
 
       if (as.isAutoCreateAddresses() && server.getAddressInfo(queueConfiguration.getAddress()) == null) {
-         securityCheck(queueConfiguration.getAddress(), queueConfiguration.getName(), CheckType.CREATE_ADDRESS, this);
+         securityStore.check(queueConfiguration.getAddress(), queueConfiguration.getName(), CheckType.CREATE_ADDRESS, this);
       }
 
       server.checkQueueCreationLimit(getUsername());
@@ -934,7 +910,7 @@ public class ServerSessionImpl implements ServerSession, FailureListener {
 
       SimpleString realAddress = CompositeAddress.extractAddressName(address);
       Pair<SimpleString, EnumSet<RoutingType>> art = getAddressAndRoutingTypes(realAddress, routingTypes);
-      securityCheck(art.getA(), CheckType.CREATE_ADDRESS, this);
+      securityStore.check(art.getA(), CheckType.CREATE_ADDRESS, this);
       server.addOrUpdateAddressInfo(new AddressInfo(art.getA(), art.getB()).setAutoCreated(autoCreated));
       return server.getAddressInfo(art.getA());
    }
@@ -953,7 +929,7 @@ public class ServerSessionImpl implements ServerSession, FailureListener {
       }
 
       AddressInfo art = getAddressAndRoutingType(addressInfo);
-      securityCheck(art.getName(), CheckType.CREATE_ADDRESS, this);
+      securityStore.check(art.getName(), CheckType.CREATE_ADDRESS, this);
       server.addOrUpdateAddressInfo(art.setAutoCreated(autoCreated));
       return server.getAddressInfo(art.getName());
    }
@@ -1043,7 +1019,7 @@ public class ServerSessionImpl implements ServerSession, FailureListener {
       }
       queueConfiguration.setAddress(removePrefix(queueConfiguration.getAddress()));
 
-      securityCheck(queueConfiguration.getAddress(), queueConfiguration.getName(), queueConfiguration.isDurable() == null || queueConfiguration.isDurable() ? CheckType.CREATE_DURABLE_QUEUE : CheckType.CREATE_NON_DURABLE_QUEUE, this);
+      securityStore.check(queueConfiguration.getAddress(), queueConfiguration.getName(), queueConfiguration.isDurable() ? CheckType.CREATE_DURABLE_QUEUE : CheckType.CREATE_NON_DURABLE_QUEUE, this);
 
       server.checkQueueCreationLimit(getUsername());
 
@@ -2029,7 +2005,7 @@ public class ServerSessionImpl implements ServerSession, FailureListener {
          AuditLogger.handleManagementMessage(this.getName(), getUsername(), tx, message, direct);
       }
       try {
-         securityCheck(removePrefix(message.getAddressSimpleString()), CheckType.MANAGE, this);
+         securityStore.check(removePrefix(message.getAddressSimpleString()), CheckType.MANAGE, this);
       } catch (ActiveMQException e) {
          if (!autoCommitSends) {
             tx.markAsRollbackOnly(e);
@@ -2143,7 +2119,7 @@ public class ServerSessionImpl implements ServerSession, FailureListener {
       // Consumer
       // check the user has write access to this address.
       try {
-         securityCheck(art.getName(), CheckType.SEND, this);
+         securityStore.check(CompositeAddress.extractAddressName(msg.getAddressSimpleString()), CompositeAddress.extractQueueName(msg.getAddressSimpleString()), CheckType.SEND, this);
       } catch (ActiveMQException e) {
          if (!autoCommitSends && tx != null) {
             tx.markAsRollbackOnly(e);
